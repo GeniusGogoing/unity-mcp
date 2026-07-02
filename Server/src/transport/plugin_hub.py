@@ -117,6 +117,7 @@ class PluginHub(WebSocketEndpoint):
     _pending: dict[str, dict[str, Any]] = {}
     _lock: asyncio.Lock | None = None
     _loop: asyncio.AbstractEventLoop | None = None
+    _last_command_timing: ClassVar[dict[str, float] | None] = None
     # session_id -> last pong timestamp (monotonic)
     _last_pong: ClassVar[dict[str, float]] = {}
     # session_id -> ping task
@@ -257,6 +258,12 @@ class PluginHub(WebSocketEndpoint):
     # Public API
     # ------------------------------------------------------------------
     @classmethod
+    def pop_last_command_timing(cls) -> dict[str, float] | None:
+        timing = cls._last_command_timing
+        cls._last_command_timing = None
+        return timing
+
+    @classmethod
     async def send_command(cls, session_id: str, command_type: str, params: dict[str, Any]) -> dict[str, Any]:
         websocket = await cls._get_connection(session_id)
         command_id = str(uuid.uuid4())
@@ -304,6 +311,7 @@ class PluginHub(WebSocketEndpoint):
                 "future": future, "session_id": session_id}
 
         try:
+            t_hub_start = time.perf_counter()
             msg = ExecuteCommandMessage(
                 id=command_id,
                 name=command_type,
@@ -311,7 +319,9 @@ class PluginHub(WebSocketEndpoint):
                 timeout=unity_timeout_s,
             )
             try:
+                t_before_send = time.perf_counter()
                 await websocket.send_json(msg.model_dump())
+                t_after_send = time.perf_counter()
             except Exception as exc:
                 # If send fails (socket already closing), fail the future so callers don't hang.
                 if not future.done():
@@ -319,6 +329,12 @@ class PluginHub(WebSocketEndpoint):
                 raise
             try:
                 result = await asyncio.wait_for(future, timeout=server_wait_s)
+                cls._last_command_timing = {
+                    "plugin_hub_prepare_ms": (t_before_send - t_hub_start) * 1000,
+                    "ws_send_ms": (t_after_send - t_before_send) * 1000,
+                    "unity_wait_ms": (time.perf_counter() - t_after_send) * 1000,
+                    "plugin_hub_total_ms": (time.perf_counter() - t_hub_start) * 1000,
+                }
                 return result
             except PluginDisconnectedError as exc:
                 return MCPResponse(success=False, error=str(exc), hint="retry").model_dump()

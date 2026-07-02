@@ -409,6 +409,8 @@ def create_mcp_server(project_scoped_tools: bool) -> FastMCP:
         async def cli_command_route(request: Request) -> JSONResponse:
             """REST endpoint for CLI commands to Unity."""
             try:
+                profile = request.headers.get("X-MCP-Profile") == "1"
+                t_handler_start = time.perf_counter()
                 body = await request.json()
 
                 command_type = body.get("type")
@@ -518,7 +520,17 @@ def create_mcp_server(project_scoped_tools: bool) -> FastMCP:
                     return JSONResponse(result.model_dump())
 
                 # Send command to Unity
+                t_before_unity = time.perf_counter()
                 result = await PluginHub.send_command(session_id, command_type, params)
+                if profile and isinstance(result, dict):
+                    timing = {
+                        "session_lookup_ms": (t_before_unity - t_handler_start) * 1000,
+                        "http_handler_ms": (time.perf_counter() - t_handler_start) * 1000,
+                    }
+                    hub_timing = PluginHub.pop_last_command_timing()
+                    if hub_timing:
+                        timing.update(hub_timing)
+                    result = {**result, "_timing": timing}
                 return JSONResponse(result)
 
             except Exception as e:
